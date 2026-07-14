@@ -1,4 +1,4 @@
-// xlcall.h - Excel XLL SDK minimal definitions
+// xlcall.h
 #ifndef XLCALL_H
 #define XLCALL_H
 
@@ -29,16 +29,14 @@ typedef struct xloper12 {
 
 extern int __stdcall Excel12v(int xlfn, void *pxResult, int count, const void *rgpx[]);
 
-// Function indices for Excel4/12
-#define xlFree             10000
-#define xlfRegister        20001
-#define xlfGetWorkbook     20008
-#define xlfGetDocument     20032
-#define xlSheetId          20059
-#define xlcOnKey           30061
+#define xlFree              10000
+#define xlfRegister         20001
+#define xlfGetWorkbook      20008
+#define xlfGetDocument      20032
+#define xlSheetId           20059
+#define xlcOnKey            30061
 #define xlcWorkbookActivate 30096
 #define xlcSelect           30243
-#define xlcSelectEnd        30244
 
 #ifdef __cplusplus
 }
