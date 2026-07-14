@@ -2,7 +2,9 @@
 // Excel XLL - Quick switch to previous sheet (Ctrl+Alt+L)
 #include <windows.h>
 
-// Excel12v function pointer
+// ============================================================
+// Types and constants
+// ============================================================
 typedef int (__stdcall *LPFNEXCEL12V)(int xlfn, void *pxResult, int count, const void *rgpx[]);
 static LPFNEXCEL12V pExcel12v = NULL;
 
@@ -12,7 +14,6 @@ static LPFNEXCEL12V pExcel12v = NULL;
         pExcel12v((fn), (pxRes), (count), args); \
     } while(0)
 
-// XLOPER12
 #define xltypeNum     0x0001
 #define xltypeStr     0x0002
 #define xltypeMissing 0x0080
@@ -34,47 +35,48 @@ typedef struct {
 #define xlcWorkbookActivate 30096
 #define xlcSelect           30243
 
+// ============================================================
 // Global state
+// ============================================================
 static BOOL    g_bHasPrev  = FALSE;
 static BOOL    g_bToggling = FALSE;
 static wchar_t g_prevBook[512] = {0};
 static wchar_t g_prevSheet[512] = {0};
 
-// ============================================================
-// Excel string: first wchar_t = length, then characters, NO null terminator
-// We pre-build these strings in static buffers
-// ============================================================
+// Static buffers for Excel strings
+static wchar_t g_sb1[256], g_sb2[256], g_sb3[256], g_sb4[256];
 
-// Helper: build an Excel string in a static buffer, returns XLOPER12
-static XLOPER12 ExcelStr(const wchar_t *s, wchar_t *buf, int bufSize)
+// ============================================================
+// Helper: build an Excel string (length-prefixed)
+// ============================================================
+static XLOPER12 Xls(const wchar_t *s, wchar_t *buf, int bufChars)
 {
     int len = (int)wcslen(s);
-    if (len > bufSize - 2) len = bufSize - 2;
+    if (len > bufChars - 2) len = bufChars - 2;
     buf[0] = (wchar_t)len;
-    memcpy(buf + 1, s, len * sizeof(wchar_t));
-    XLOPER12 x = {{0}, xltypeStr};
+    if (len > 0) memcpy(buf + 1, s, len * sizeof(wchar_t));
+    XLOPER12 x;
+    x.xltype = xltypeStr;
     x.val.str = buf;
     return x;
 }
 
-static XLOPER12 OpInt(int i)
+static XLOPER12 Xi(int i)
 {
-    XLOPER12 x = {{0}, xltypeInt};
+    XLOPER12 x;
+    x.xltype = xltypeInt;
     x.val.w = (unsigned short)i;
     return x;
 }
 
-// Static buffers for Excel strings (one per use)
-static wchar_t g_buf1[256], g_buf2[256], g_buf3[256], g_buf4[256], g_buf5[256];
-
 // ============================================================
-// Get current workbook name and sheet name
+// Get current workbook and sheet names
 // ============================================================
 static void GetCurrent(wchar_t *book, int bsize, wchar_t *sheet, int ssize)
 {
     XLOPER12 xArg, xRes;
 
-    xArg = OpInt(88);
+    xArg = Xi(88);
     xRes.xltype = xltypeNil;
     EXCEL12(xlfGetDocument, &xRes, 1, &xArg);
     if (xRes.xltype == xltypeStr && xRes.val.str) {
@@ -86,7 +88,7 @@ static void GetCurrent(wchar_t *book, int bsize, wchar_t *sheet, int ssize)
         book[0] = 0;
     }
 
-    xArg = OpInt(76);
+    xArg = Xi(76);
     xRes.xltype = xltypeNil;
     EXCEL12(xlfGetDocument, &xRes, 1, &xArg);
     if (xRes.xltype == xltypeStr && xRes.val.str) {
@@ -106,60 +108,49 @@ static BOOL Activate(const wchar_t *book, const wchar_t *sheet)
 {
     if (book[0] == 0 || sheet[0] == 0) return FALSE;
 
-    XLOPER12 xBook = ExcelStr(book, g_buf4, 256);
-    EXCEL12(xlcWorkbookActivate, 0, 1, &xBook);
+    XLOPER12 xb = Xls(book, g_sb3, 256);
+    EXCEL12(xlcWorkbookActivate, 0, 1, &xb);
 
-    XLOPER12 xSheet = ExcelStr(sheet, g_buf5, 256);
-    EXCEL12(xlcSelect, 0, 1, &xSheet);
+    XLOPER12 xs = Xls(sheet, g_sb4, 256);
+    EXCEL12(xlcSelect, 0, 1, &xs);
 
     return TRUE;
 }
 
 // ============================================================
-// Toggle command
-// ============================================================
-__declspec(dllexport) void WINAPI ToggleCmd(void)
-{
-    if (!g_bHasPrev) return;
-
-    wchar_t curBook[512], curSheet[512];
-    GetCurrent(curBook, 512, curSheet, 512);
-
-    g_bToggling = TRUE;
-    Activate(g_prevBook, g_prevSheet);
-
-    wcscpy(g_prevBook, curBook);
-    wcscpy(g_prevSheet, curSheet);
-
-    g_bToggling = FALSE;
-}
-
-// ============================================================
-// Update history
+// Main command: record current and switch to previous
 // ============================================================
 __declspec(dllexport) void WINAPI SwitchCmd(void)
 {
+    if (g_bToggling) return;
+
     wchar_t curBook[512], curSheet[512];
     GetCurrent(curBook, 512, curSheet, 512);
 
     if (!g_bHasPrev) {
+        // First call: just record current position
         wcscpy(g_prevBook, curBook);
         wcscpy(g_prevSheet, curSheet);
         g_bHasPrev = TRUE;
         return;
     }
 
-    if (wcscmp(curBook, g_prevBook) != 0 || wcscmp(curSheet, g_prevSheet) != 0) {
-        wchar_t oldBook[512], oldSheet[512];
-        wcscpy(oldBook, g_prevBook);
-        wcscpy(oldSheet, g_prevSheet);
-        wcscpy(g_prevBook, curBook);
-        wcscpy(g_prevSheet, curSheet);
-
-        g_bToggling = TRUE;
-        Activate(oldBook, oldSheet);
-        g_bToggling = FALSE;
+    // Check if we're already on the "previous" sheet
+    if (wcscmp(curBook, g_prevBook) == 0 && wcscmp(curSheet, g_prevSheet) == 0) {
+        return; // Already there, nothing to do
     }
+
+    // Save current as new previous
+    wchar_t oldBook[512], oldSheet[512];
+    wcscpy(oldBook, g_prevBook);
+    wcscpy(oldSheet, g_prevSheet);
+    wcscpy(g_prevBook, curBook);
+    wcscpy(g_prevSheet, curSheet);
+
+    // Jump to old position
+    g_bToggling = TRUE;
+    Activate(oldBook, oldSheet);
+    g_bToggling = FALSE;
 }
 
 // ============================================================
@@ -171,44 +162,40 @@ __declspec(dllexport) int WINAPI xlAutoOpen(void)
     pExcel12v = (LPFNEXCEL12V)GetProcAddress(hMod, "Excel12v");
     if (!pExcel12v) return 0;
 
-    XLOPER12 xRes, xArgs[7];
+    // Register command with shortcut "L"
+    XLOPER12 xRes;
+    XLOPER12 a0 = Xls(L"SwitchCmd", g_sb1, 256);
+    XLOPER12 a1 = Xls(L"L", g_sb2, 256);
 
-    xArgs[0] = ExcelStr(L"SwitchCmd", g_buf1, 256);
-    xArgs[1] = ExcelStr(L"L", g_buf2, 256);
-    xArgs[2] = ExcelStr(L"SwitchCmd", g_buf3, 256);
-    xArgs[3] = OpStrStatic(L"", 0);
-    xArgs[4] = OpInt(1);
-    xArgs[5] = OpStrStatic(L"Previous Sheet", 14);
-    xArgs[6] = OpInt(0);
+    static wchar_t nameBuf[32] = {9, L'S',L'w',L'i',L't',L'c',L'h',L'C',L'm',L'd'};
+    XLOPER12 a2;
+    a2.xltype = xltypeStr; a2.val.str = nameBuf;
 
-    // Fix xArgs[3] and xArgs[5]
-    {
-        static wchar_t b3[2] = {0, 0};
-        b3[0] = 0;
-        XLOPER12 x3 = {{0}, xltypeStr};
-        x3.val.str = b3;
-        xArgs[3] = x3;
-    }
-    {
-        static wchar_t b5[32] = {14, L'P',L'r',L'e',L'v',L'i',L'o',L'u',L's',L' ',L'S',L'h',L'e',L'e',L't'};
-        XLOPER12 x5 = {{0}, xltypeStr};
-        x5.val.str = b5;
-        xArgs[5] = x5;
-    }
+    static wchar_t emptyBuf[2] = {0, 0};
+    XLOPER12 a3;
+    a3.xltype = xltypeStr; a3.val.str = emptyBuf;
 
-    EXCEL12(xlfRegister, &xRes, 7,
-            &xArgs[0], &xArgs[1], &xArgs[2], &xArgs[3],
-            &xArgs[4], &xArgs[5], &xArgs[6]);
+    XLOPER12 a4 = Xi(1);
+
+    static wchar_t catBuf[32] = {14, L'P',L'r',L'e',L'v',L'i',L'o',L'u',L's',L' ',L'S',L'h',L'e',L'e',L't'};
+    XLOPER12 a5;
+    a5.xltype = xltypeStr; a5.val.str = catBuf;
+
+    XLOPER12 a6 = Xi(0);
+
+    EXCEL12(xlfRegister, &xRes, 7, &a0, &a1, &a2, &a3, &a4, &a5, &a6);
 
     // Bind Ctrl+Alt+L
-    static wchar_t keyBuf[8] = {4, L'^', L'%', L'L', 0};
-    static wchar_t cmdBuf[16] = {9, L'S',L'w',L'i',L't',L'c',L'h',L'C',L'm',L'd'};
+    static wchar_t keyBuf[8] = {4, L'^', L'%', L'L'};
+    XLOPER12 xKey;
+    xKey.xltype = xltypeStr; xKey.val.str = keyBuf;
 
-    XLOPER12 xKey = {{0}, xltypeStr};  xKey.val.str = keyBuf;
-    XLOPER12 xCmd = {{0}, xltypeStr};  xCmd.val.str = cmdBuf;
+    XLOPER12 xCmd;
+    xCmd.xltype = xltypeStr; xCmd.val.str = nameBuf;
+
     EXCEL12(xlcOnKey, 0, 2, &xKey, &xCmd);
 
-    // Init
+    // Init state
     wchar_t b[512], s[512];
     GetCurrent(b, 512, s, 512);
     wcscpy(g_prevBook, b);
@@ -218,26 +205,15 @@ __declspec(dllexport) int WINAPI xlAutoOpen(void)
     return 1;
 }
 
-// Need this helper
-static XLOPER12 OpStrStatic(const wchar_t *s, int len)
-{
-    static wchar_t buf[256];
-    buf[0] = (wchar_t)len;
-    if (len > 0) memcpy(buf + 1, s, len * sizeof(wchar_t));
-    XLOPER12 x = {{0}, xltypeStr};
-    x.val.str = buf;
-    return x;
-}
-
 // ============================================================
 // xlAutoClose
 // ============================================================
 __declspec(dllexport) int WINAPI xlAutoClose(void)
 {
     if (pExcel12v) {
-        static wchar_t k[8] = {4, L'^', L'%', L'L', 0};
-        XLOPER12 xKey = {{0}, xltypeStr};
-        xKey.val.str = k;
+        static wchar_t k[8] = {4, L'^', L'%', L'L'};
+        XLOPER12 xKey;
+        xKey.xltype = xltypeStr; xKey.val.str = k;
         EXCEL12(xlcOnKey, 0, 1, &xKey);
     }
     return 1;
