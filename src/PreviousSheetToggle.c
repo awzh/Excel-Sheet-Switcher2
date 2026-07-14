@@ -1,201 +1,164 @@
-// PreviousSheetToggle.c
-// Excel XLL - Quick switch to previous sheet (Ctrl+Alt+L)
-// Uses keyboard hook, no xlfRegister needed
+// PreviousSheetToggle.c - Excel XLL Sheet Switcher
+#define _XLL_
 #include <windows.h>
+#include "xlcall.h"
 
-// ============================================================
-// Excel12v
-// ============================================================
-typedef int (__stdcall *LPFNEXCEL12V)(int xlfn, void *pxResult, int count, const void *rgpx[]);
-static LPFNEXCEL12V pExcel12v = NULL;
+// Global Excel12v function pointer
+LPFNEXCEL12V pxExcel12v = NULL;
 
-#define EXCEL12(fn, pxRes, count, ...) \
-    do { const void *a[] = { __VA_ARGS__ }; pExcel12v((fn), (pxRes), (count), a); } while(0)
+// Command ID returned by xlfRegister
+static int g_cmdID = 0;
 
-// ============================================================
-// XLOPER12 constants
-// ============================================================
-#define xltypeNum  0x0001
-#define xltypeStr  0x0002
-#define xltypeInt  0x0800
-#define xltypeNil  0x0100
-
-typedef struct {
-    union { double num; wchar_t *str; unsigned short w; } val;
-    unsigned short xltype;
-} XLOPER12;
-
-// ============================================================
-// Excel function indices
-// ============================================================
-#define xlGetHwnd           20038
-#define xlfGetDocument      20032
-#define xlcWorkbookActivate 30096
-#define xlcSelect           30243
-
-// ============================================================
-// Global state
-// ============================================================
+// State
 static BOOL    g_bHasPrev  = FALSE;
 static BOOL    g_bToggling = FALSE;
 static wchar_t g_prevBook[512] = {0};
 static wchar_t g_prevSheet[512] = {0};
-static HHOOK   g_hHook     = NULL;
 
-// String buffer ring
-static wchar_t g_buf[4][256];
-static int g_bi = 0;
-
-// ============================================================
-// Helpers
-// ============================================================
-static XLOPER12 Xls(const wchar_t *s)
+// Get current workbook and sheet names
+static void GetCurrent(wchar_t *book, int bsize, wchar_t *sheet, int ssize)
 {
-    wchar_t *b = g_buf[g_bi]; g_bi = (g_bi + 1) % 4;
-    int len = (int)wcslen(s);
-    if (len > 254) len = 254;
-    b[0] = (wchar_t)len;
-    memcpy(b + 1, s, len * sizeof(wchar_t));
+    XLOPER12 xRes, xArg;
+    
+    xArg.xltype = xltypeInt; xArg.val.w = 88;
+    xRes.xltype = xltypeNil;
+    Excel12v(xlfGetDocument, &xRes, 1, &xArg);
+    if (xRes.xltype == xltypeStr && xRes.val.str) {
+        int len = xRes.val.str[0];
+        if (len > bsize - 1) len = bsize - 1;
+        memcpy(book, xRes.val.str + 1, len * sizeof(wchar_t));
+        book[len] = 0;
+    } else { book[0] = 0; }
+    
+    xArg.xltype = xltypeInt; xArg.val.w = 76;
+    xRes.xltype = xltypeNil;
+    Excel12v(xlfGetDocument, &xRes, 1, &xArg);
+    if (xRes.xltype == xltypeStr && xRes.val.str) {
+        int len = xRes.val.str[0];
+        if (len > ssize - 1) len = ssize - 1;
+        memcpy(sheet, xRes.val.str + 1, len * sizeof(wchar_t));
+        sheet[len] = 0;
+    } else { sheet[0] = 0; }
+}
+
+// Activate workbook and sheet
+static void Activate(const wchar_t *book, const wchar_t *sheet)
+{
+    if (book[0] == 0 || sheet[0] == 0) return;
     XLOPER12 x;
     x.xltype = xltypeStr;
-    x.val.str = b;
-    return x;
+    x.val.str = (wchar_t*)book;
+    Excel12v(xlcWorkbookActivate, NULL, 1, &x);
+    x.val.str = (wchar_t*)sheet;
+    Excel12v(xlcSelect, NULL, 1, &x);
 }
 
-static XLOPER12 Xi(int i)
-{
-    XLOPER12 x;
-    x.xltype = xltypeInt;
-    x.val.w = (unsigned short)i;
-    return x;
-}
-
-// ============================================================
-// Get current workbook and sheet
-// ============================================================
-static void Cur(wchar_t *bk, int bs, wchar_t *sh, int ss)
-{
-    XLOPER12 r, a;
-
-    a = Xi(88);
-    EXCEL12(xlfGetDocument, &r, 1, &a);
-    if (r.xltype == xltypeStr && r.val.str) {
-        int len = r.val.str[0];
-        if (len > bs - 1) len = bs - 1;
-        memcpy(bk, r.val.str + 1, len * sizeof(wchar_t));
-        bk[len] = 0;
-    } else {
-        bk[0] = 0;
-    }
-
-    a = Xi(76);
-    EXCEL12(xlfGetDocument, &r, 1, &a);
-    if (r.xltype == xltypeStr && r.val.str) {
-        int len = r.val.str[0];
-        if (len > ss - 1) len = ss - 1;
-        memcpy(sh, r.val.str + 1, len * sizeof(wchar_t));
-        sh[len] = 0;
-    } else {
-        sh[0] = 0;
-    }
-}
-
-// ============================================================
-// Activate workbook and sheet
-// ============================================================
-static void Go(const wchar_t *bk, const wchar_t *sh)
-{
-    if (bk[0] == 0 || sh[0] == 0) return;
-    XLOPER12 a = Xls(bk);
-    EXCEL12(xlcWorkbookActivate, 0, 1, &a);
-    a = Xls(sh);
-    EXCEL12(xlcSelect, 0, 1, &a);
-}
-
-// ============================================================
-// Switch logic
-// ============================================================
-static void DoSwitch(void)
+// The actual switch function - exported for OnKey
+__declspec(dllexport) void WINAPI DoSwitch(void)
 {
     if (g_bToggling) return;
-
+    
     wchar_t cb[512], cs[512];
-    Cur(cb, 512, cs, 512);
-
+    GetCurrent(cb, 512, cs, 512);
+    
     if (!g_bHasPrev) {
         wcscpy(g_prevBook, cb);
         wcscpy(g_prevSheet, cs);
         g_bHasPrev = TRUE;
         return;
     }
-
+    
     if (wcscmp(cb, g_prevBook) == 0 && wcscmp(cs, g_prevSheet) == 0) return;
-
+    
     wchar_t ob[512], os[512];
     wcscpy(ob, g_prevBook);
     wcscpy(os, g_prevSheet);
     wcscpy(g_prevBook, cb);
     wcscpy(g_prevSheet, cs);
-
+    
     g_bToggling = TRUE;
-    Go(ob, os);
+    Activate(ob, os);
     g_bToggling = FALSE;
 }
 
-// ============================================================
-// Keyboard hook
-// ============================================================
-static LRESULT CALLBACK KeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
-        KBDLLHOOKSTRUCT *k = (KBDLLHOOKSTRUCT *)lParam;
-        if (k->vkCode == 'L' &&
-            (GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
-            (GetAsyncKeyState(VK_MENU) & 0x8000)) {
-            DoSwitch();
-            return 1;
-        }
-    }
-    return CallNextHookEx(g_hHook, nCode, wParam, lParam);
-}
-
-// ============================================================
 // xlAutoOpen
-// ============================================================
 __declspec(dllexport) int WINAPI xlAutoOpen(void)
 {
-    HMODULE hMod = GetModuleHandle(NULL);
-    pExcel12v = (LPFNEXCEL12V)GetProcAddress(hMod, "Excel12v");
-    if (!pExcel12v) return 0;
-
-    // Install keyboard hook
-    g_hHook = SetWindowsHookEx(WH_KEYBOARD, KeyboardProc, hMod, GetCurrentThreadId());
-
-    // Init state
+    static XLOPER12 xResult;
+    
+    // Get Excel12v
+    pxExcel12v = (LPFNEXCEL12V)GetProcAddress(GetModuleHandle(NULL), "Excel12v");
+    if (!pxExcel12v) return 0;
+    
+    // Register command using xlfRegister with proper string arguments
+    // Arg0: Dll function name
+    XLOPER12 arg0;
+    arg0.xltype = xltypeStr;
+    arg0.val.str = L"\x08DoSwitch";  // Length 8: DoSwitch
+    
+    // Arg1: type_text - " " means no built-in shortcut
+    XLOPER12 arg1;
+    arg1.xltype = xltypeStr;
+    arg1.val.str = L"\x01 ";  // Length 1: space
+    
+    // Arg2: Function name in Excel
+    XLOPER12 arg2;
+    arg2.xltype = xltypeStr;
+    arg2.val.str = L"\x08DoSwitch";
+    
+    // Arg3: Argument description - empty
+    XLOPER12 arg3;
+    arg3.xltype = xltypeStr;
+    arg3.val.str = L"\x00";
+    
+    // Arg4: Macro type - 1 = command
+    XLOPER12 arg4;
+    arg4.xltype = xltypeInt;
+    arg4.val.w = 1;
+    
+    // Arg5: Category
+    XLOPER12 arg5;
+    arg5.xltype = xltypeStr;
+    arg5.val.str = L"\x0ESheet Switcher";  // Length 14
+    
+    // Arg6: Reserved
+    XLOPER12 arg6;
+    arg6.xltype = xltypeInt;
+    arg6.val.w = 0;
+    
+    Excel12v(xlfRegister, &xResult, 7, &arg0, &arg1, &arg2, &arg3, &arg4, &arg5, &arg6);
+    
+    // Bind Ctrl+Alt+L
+    XLOPER12 xKey, xCmd;
+    xKey.xltype = xltypeStr;
+    xKey.val.str = L"\x04^%L";  // Length 4: ^%L = Ctrl+Alt+L
+    xCmd.xltype = xltypeStr;
+    xCmd.val.str = L"\x08DoSwitch";
+    Excel12v(xlcOnKey, NULL, 2, &xKey, &xCmd);
+    
+    // Init
     wchar_t b[512], s[512];
-    Cur(b, 512, s, 512);
+    GetCurrent(b, 512, s, 512);
     wcscpy(g_prevBook, b);
     wcscpy(g_prevSheet, s);
     g_bHasPrev = TRUE;
-
+    
     return 1;
 }
 
-// ============================================================
 // xlAutoClose
-// ============================================================
 __declspec(dllexport) int WINAPI xlAutoClose(void)
 {
-    if (g_hHook) {
-        UnhookWindowsHookEx(g_hHook);
-        g_hHook = NULL;
+    if (pxExcel12v) {
+        XLOPER12 xKey;
+        xKey.xltype = xltypeStr;
+        xKey.val.str = L"\x04^%L";
+        Excel12v(xlcOnKey, NULL, 1, &xKey);
     }
     return 1;
 }
 
-// ============================================================
 // DllMain
-// ============================================================
 BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p)
 {
     if (r == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(h);
