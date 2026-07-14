@@ -1,0 +1,29 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [x64, x86]
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@v4
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: ${{ matrix.arch }}
+    - shell: cmd
+      run: |
+        if "${{ matrix.arch }}"=="x86" (
+          cl /LD /MD src\PreviousSheetToggle.c /link /DLL /EXPORT:xlAutoOpen /EXPORT:xlAutoClose /OUT:PreviousSheetToggle32.xll
+        ) else (
+          cl /LD /MD src\PreviousSheetToggle.c /link /DLL /EXPORT:xlAutoOpen /EXPORT:xlAutoClose /OUT:PreviousSheetToggle64.xll
+        )
+    - uses: actions/upload-artifact@v4
+      with:
+        name: XLL-${{ matrix.arch }}
+        path: "*.xll"
